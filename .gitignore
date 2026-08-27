@@ -1,0 +1,25 @@
+# Binaries
+tmp/
+*.exe
+*.exe.manifest
+*.dll
+*.so
+*.dylib
+
+# Test binary, for more info see: https://blog.golang.org/testing-go-binary
+_testexecutable
+
+# Miscellaneous
+*.db
+
+# IDE
+.idea/
+*.swp
+*.swo
+.vscode/
+
+# Go module cache
+go.sum.bak
+
+# Environment
+.env
