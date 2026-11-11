@@ -3,6 +3,7 @@ package gastos
 import (
 	"database/sql"
 	"net/http"
+	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
@@ -77,7 +78,11 @@ func editarGastosHandler(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		var gasto Gasto
 
-		id := c.Param("id")
+		id, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "id inválido"})
+			return
+		}
 
 		if err := c.ShouldBindJSON(&gasto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -97,7 +102,7 @@ func editarGastosHandler(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		if rows == 0 {
-			c.JSON(http.StatusCreated, gin.H{"data": gasto})
+			c.JSON(http.StatusNotFound, gin.H{"error": "gasto no encontrado"})
 			return
 		}
 		c.JSON(http.StatusOK, gin.H{"data": gasto})
@@ -122,4 +127,31 @@ func borrarGastoHandler(database *sql.DB) gin.HandlerFunc {
 
 		c.JSON(http.StatusOK, gin.H{"mensaje": "gasto eliminado"})
 	}
+}
+
+func obtenerGastoHandlerId(database *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		id := c.Param("id")
+
+		result, err := database.Query("SELECT id, monto, categoria, fecha, descripcion FROM gastos WHERE id = ?", id)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer result.Close()
+
+		if result.Next() {
+			var gasto Gasto
+			if err := result.Scan(&gasto.ID, &gasto.Monto, &gasto.Categoria, &gasto.Fecha, &gasto.Descripcion); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			c.JSON(http.StatusOK, gin.H{"data": gasto})
+			return
+		}
+
+		c.JSON(http.StatusNotFound, gin.H{"error": "gasto no encontrado"})
+
+	}
+
 }

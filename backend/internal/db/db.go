@@ -7,11 +7,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func InitDB() *sql.DB {
-	// Abre (o crea si no existe) el archivo gastos.db
-	db, err := sql.Open("sqlite", "./gastos.db")
+//func InitDB() *sql.DB {
+//	// Abre (o crea si no existe) el archivo gastos.db
+//	db, err := sql.Open("sqlite", "./gastos.db")
+//	if err != nil {
+//		log.Fatal("Error al abrir la base de datos:", err)
+//	}
+
+func InitDB(path string) *sql.DB {
+	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		log.Fatal("Error al abrir la base de datos:", err)
+	}
+	if path == ":memory:" {
+		db.SetMaxOpenConns(1)
 	}
 
 	// Creamos la tabla si todavía no existe

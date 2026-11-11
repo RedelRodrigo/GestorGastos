@@ -12,6 +12,8 @@ func RouterGasto(router *gin.Engine, database *sql.DB) {
 
 	router.GET("/gastos", obtenerGastosHandler(database))
 
+	router.GET("/gastos/:id", obtenerGastoHandlerId(database))
+
 	router.PUT("/gastos/:id", editarGastosHandler(database))
 
 	router.DELETE("/gastos/:id", borrarGastoHandler(database))
