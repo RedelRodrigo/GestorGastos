@@ -25,7 +25,7 @@ func crearGastosHandler(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		id, _ := result.LastInsertId()
-		gasto.ID = int(id)
+		gasto.ID = int64(int(id))
 
 		c.JSON(http.StatusCreated, gin.H{"data": gasto})
 	}
@@ -131,7 +131,11 @@ func borrarGastoHandler(database *sql.DB) gin.HandlerFunc {
 
 func obtenerGastoHandlerId(database *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		id := c.Param("id")
+		id, err := strconv.Atoi(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "id inválido"})
+			return
+		}
 
 		result, err := database.Query("SELECT id, monto, categoria, fecha, descripcion FROM gastos WHERE id = ?", id)
 		if err != nil {

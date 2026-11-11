@@ -1,42 +1,40 @@
+// Package db se encarga de abrir la conexión a SQLite y de preparar el esquema.
 package db
 
 import (
 	"database/sql"
-	"log"
+	"fmt"
 
-	_ "modernc.org/sqlite"
+	_ "modernc.org/sqlite" // registra el driver "sqlite"
 )
 
-//func InitDB() *sql.DB {
-//	// Abre (o crea si no existe) el archivo gastos.db
-//	db, err := sql.Open("sqlite", "./gastos.db")
-//	if err != nil {
-//		log.Fatal("Error al abrir la base de datos:", err)
-//	}
+const esquema = `
+CREATE TABLE IF NOT EXISTS gastos (
+	id          INTEGER PRIMARY KEY AUTOINCREMENT,
+	monto       REAL NOT NULL,
+	categoria   TEXT NOT NULL,
+	fecha       TEXT NOT NULL, -- formato ISO: AAAA-MM-DD
+	descripcion TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_gastos_fecha ON gastos(fecha);
+`
 
-func InitDB(path string) *sql.DB {
-	db, err := sql.Open("sqlite", path)
+// Abrir abre (o crea) la base de datos en path y garantiza que el esquema exista.
+// Usar ":memory:" como path crea una base temporal, útil para tests.
+func Abrir(path string) (*sql.DB, error) {
+	database, err := sql.Open("sqlite", path)
 	if err != nil {
-		log.Fatal("Error al abrir la base de datos:", err)
+		return nil, fmt.Errorf("abrir base de datos: %w", err)
 	}
+
+	// Cada conexión a ":memory:" sería una base distinta; con una sola se comparte.
 	if path == ":memory:" {
-		db.SetMaxOpenConns(1)
+		database.SetMaxOpenConns(1)
 	}
 
-	// Creamos la tabla si todavía no existe
-	query := `
-	CREATE TABLE IF NOT EXISTS gastos (
-		id INTEGER PRIMARY KEY AUTOINCREMENT,
-		monto REAL NOT NULL,
-		categoria TEXT NOT NULL,
-		fecha TEXT NOT NULL,
-		descripcion TEXT
-	);`
-
-	_, err = db.Exec(query)
-	if err != nil {
-		log.Fatal("Error al crear la tabla:", err)
+	if _, err := database.Exec(esquema); err != nil {
+		_ = database.Close()
+		return nil, fmt.Errorf("crear esquema: %w", err)
 	}
-
-	return db
+	return database, nil
 }
