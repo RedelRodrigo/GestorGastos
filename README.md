@@ -66,14 +66,14 @@ Fragmento de código
 TURSO_DATABASE_URL=tu_url_de_turso
 TURSO_AUTH_TOKEN=tu_token_de_turso
 ```
-Opción A: Usando Docker Compose (Recomendado):
+### Opción A: Usando Docker Compose (Recomendado):
 ```bash
 docker compose build --no-cache
 docker compose up -d
 ```
 Abre tu navegador y accede a: http://localhost:8080
 
-Opción B: Ejecución Manual (Modo Desarrollo)
+### Opción B: Ejecución Manual (Modo Desarrollo)
 1. Levantar el Backend (Go):
 
 ```Bash
