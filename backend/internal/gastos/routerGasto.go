@@ -7,24 +7,25 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
-func RouterGasto(router *gin.Engine, database *sql.DB) {
-
-	// Dentro de tu inicialización de rutas:
-	router.Use(cors.New(cors.Config{
+func RouterGasto(r *gin.Engine, db *sql.DB) {
+	// Configuración de CORS para el frontend en Vite (puerto 5173)
+	r.Use(cors.New(cors.Config{
 		AllowOrigins: []string{"http://localhost:5173"},
 		AllowMethods: []string{"GET", "POST", "PUT", "DELETE"},
-		AllowHeaders: []string{"Content-Type"},
+		AllowHeaders: []string{"Content-Type", "X-User-ID"}, // <- Añadido X-User-ID
 	}))
 
-	router.POST("/gastos", crearGastosHandler(database))
+	// Inyección de dependencias
+	repo := NewSQLiteRepository(db)
+	h := NewHandler(repo)
 
-	router.GET("/gastos", obtenerGastosHandler(database))
-
-	router.GET("/gastos/:id", obtenerGastoHandlerId(database))
-
-	router.PUT("/gastos/:id", editarGastosHandler(database))
-
-	router.DELETE("/gastos/:id", borrarGastoHandler(database))
-
-	router.GET("/gastos/resumen", resumenHandler(database))
+	// Agrupación de rutas
+	gastosGroup := r.Group("/gastos")
+	{
+		gastosGroup.POST("", h.CrearGasto)
+		gastosGroup.GET("", h.ListarGastos)
+		gastosGroup.GET("/resumen", h.ObtenerResumen)
+		gastosGroup.PUT("/:id", h.EditarGasto)
+		gastosGroup.DELETE("/:id", h.BorrarGasto)
+	}
 }

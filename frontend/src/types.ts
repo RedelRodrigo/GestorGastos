@@ -12,3 +12,9 @@ export interface ResumenItem {
   categoria: string;
   total: number;
 }
+
+export interface Usuario {
+  id: number;
+  email: string;
+  username: string;
+}

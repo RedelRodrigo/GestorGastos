@@ -1,9 +1,10 @@
 import React, { useState } from "react";
 import { crearGasto, editarGasto } from "../api";
 import type { Gasto } from "../types";
-import { PlusCircle, Save, X, AlertCircle } from "lucide-react";
+import { PlusCircle, Save, X } from "lucide-react";
+import FormAlert from "./FormAlert";
 
-interface Props {
+interface GastoFormProps {
   inicial: Gasto | null;
   onGuardado: () => void;
   onCancelar: () => void;
@@ -18,7 +19,11 @@ const CATEGORIAS_SUGERIDAS = [
   "Otros",
 ];
 
-export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
+export default function GastoForm({
+  inicial,
+  onGuardado,
+  onCancelar,
+}: GastoFormProps) {
   const [monto, setMonto] = useState(inicial ? String(inicial.monto) : "");
   const [categoria, setCategoria] = useState(inicial?.categoria ?? "");
   const [fecha, setFecha] = useState(
@@ -33,14 +38,10 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
     setError("");
     setCargando(true);
 
-    const datos = { monto: Number(monto), categoria, fecha, descripcion };
-
     try {
-      if (inicial) {
-        await editarGasto(inicial.id, datos);
-      } else {
-        await crearGasto(datos);
-      }
+      const datos = { monto: Number(monto), categoria, fecha, descripcion };
+      if (inicial) await editarGasto(inicial.id, datos);
+      else await crearGasto(datos);
       onGuardado();
     } catch (err) {
       setError((err as Error).message);
@@ -70,15 +71,7 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
         )}
       </div>
 
-      {error && (
-        <div
-          role="alert"
-          className="flex items-center gap-2 bg-rose-500/10 border border-rose-500/20 text-rose-400 p-3 rounded-xl text-sm"
-        >
-          <AlertCircle className="w-4 h-4 shrink-0" />
-          <span>{error}</span>
-        </div>
-      )}
+      {error && <FormAlert message={error} />}
 
       <div>
         <label
@@ -95,7 +88,7 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
           value={monto}
           onChange={(e) => setMonto(e.target.value)}
           required
-          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent tabular-nums"
+          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 tabular-nums"
         />
       </div>
 
@@ -113,10 +106,10 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
           value={categoria}
           onChange={(e) => setCategoria(e.target.value)}
           required
-          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"
         />
         <datalist id="sugerencias-cat">
-          {CATEGORIAS_SUGERIDAS.map((cat) => (
+          {CATEGORIAS_SUGERIDAS?.map((cat) => (
             <option key={cat} value={cat} />
           ))}
         </datalist>
@@ -135,7 +128,7 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
           value={fecha}
           onChange={(e) => setFecha(e.target.value)}
           required
-          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"
         />
       </div>
 
@@ -152,7 +145,7 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
           placeholder="Detalle adicional..."
           value={descripcion}
           onChange={(e) => setDescripcion(e.target.value)}
-          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-transparent"
+          className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-zinc-100 focus:outline-none focus:ring-2 focus:ring-emerald-500"
         />
       </div>
 
@@ -160,7 +153,7 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
         <button
           type="submit"
           disabled={cargando}
-          className="flex-1 bg-emerald-600 hover:bg-emerald-500 active:bg-emerald-700 text-zinc-950 font-semibold py-2.5 px-4 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20 focus:outline-none focus:ring-2 focus:ring-emerald-400 disabled:opacity-50"
+          className="flex-1 bg-emerald-600 hover:bg-emerald-500 text-zinc-950 font-semibold py-2.5 px-4 rounded-xl transition-all flex items-center justify-center gap-2 shadow-lg shadow-emerald-900/20 disabled:opacity-50"
         >
           {inicial ? (
             <Save className="w-4 h-4" />
@@ -174,7 +167,7 @@ export default function GastoForm({ inicial, onGuardado, onCancelar }: Props) {
           <button
             type="button"
             onClick={onCancelar}
-            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium py-2.5 px-4 rounded-xl transition-colors focus:outline-none focus:ring-2 focus:ring-zinc-600"
+            className="bg-zinc-800 hover:bg-zinc-700 text-zinc-300 font-medium py-2.5 px-4 rounded-xl transition-colors"
           >
             Cancelar
           </button>
