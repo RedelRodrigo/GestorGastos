@@ -123,7 +123,10 @@ export default function App() {
               inicial={editando}
               onGuardado={() => {
                 setEditando(null);
-                refrescarDatos();
+                // 🟢 Damos un micro-respiro de 100ms para asegurar que Turso procese el INSERT
+                setTimeout(() => {
+                  refrescarDatos();
+                }, 100);
               }}
               onCancelar={() => setEditando(null)}
             />

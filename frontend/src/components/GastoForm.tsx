@@ -40,8 +40,19 @@ export default function GastoForm({
 
     try {
       const datos = { monto: Number(monto), categoria, fecha, descripcion };
-      if (inicial) await editarGasto(inicial.id, datos);
-      else await crearGasto(datos);
+
+      if (inicial) {
+        await editarGasto(inicial.id, datos);
+      } else {
+        await crearGasto(datos);
+        // Limpiamos el formulario si es un nuevo registro
+        setMonto("");
+        setCategoria("");
+        setDescripcion("");
+        setFecha(new Date().toISOString().slice(0, 10));
+      }
+
+      // Notificamos al componente padre para que recargue los datos y actualice la tabla/resumen
       onGuardado();
     } catch (err) {
       setError((err as Error).message);
@@ -82,6 +93,7 @@ export default function GastoForm({
         </label>
         <input
           id="monto"
+          name="monto"
           type="number"
           step="0.01"
           placeholder="0.00"
@@ -101,6 +113,7 @@ export default function GastoForm({
         </label>
         <input
           id="categoria"
+          name="categoria"
           list="sugerencias-cat"
           placeholder="Ej. Comida, Transporte..."
           value={categoria}
@@ -124,6 +137,7 @@ export default function GastoForm({
         </label>
         <input
           id="fecha"
+          name="fecha"
           type="date"
           value={fecha}
           onChange={(e) => setFecha(e.target.value)}
@@ -141,6 +155,7 @@ export default function GastoForm({
         </label>
         <input
           id="descripcion"
+          name="descripcion"
           type="text"
           placeholder="Detalle adicional..."
           value={descripcion}

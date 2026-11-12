@@ -1,4 +1,4 @@
-import type { Gasto, GastoInput, ResumenItem, Usuario } from "./types";
+import type { Gasto, GastoInput, Usuario } from "./types";
 
 export const obtenerUsuarioActual = (): Usuario | null => {
   const data = localStorage.getItem("gestor_sesion_usuario");
@@ -55,6 +55,13 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   const body = await res.json().catch(() => ({}));
+
+  // 🟢 Agrega este log para ver exactamente qué responde el servidor de Go
+  console.log(
+    `[API Response] ${init?.method || "GET"} ${path} (Status: ${res.status}):`,
+    body,
+  );
+
   if (!res.ok) {
     throw new Error(
       (body as { error?: string }).error ?? `Error HTTP: ${res.status}`,
@@ -63,8 +70,18 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
-export const listarGastos = (query = "") =>
-  request<{ data: Gasto[] }>(`/gastos${query}`).then((r) => r.data);
+export const listarGastos = async (query = "") => {
+  const res = await request<any>(`/gastos${query}`);
+
+  // Si 'res' es un array directamente
+  if (Array.isArray(res)) return res;
+
+  // Si viene envuelto en .data
+  if (res && Array.isArray(res.data)) return res.data;
+
+  // Si el servidor devolvió {} u otra cosa extraña, devolvemos array vacío
+  return [];
+};
 
 export const crearGasto = (g: GastoInput) =>
   request<{ data: Gasto }>("/gastos", {
@@ -83,5 +100,27 @@ export const borrarGasto = (id: number) =>
     method: "DELETE",
   });
 
-export const obtenerResumen = () =>
-  request<{ data: ResumenItem[]; total: number }>("/gastos/resumen");
+export const obtenerResumen = async () => {
+  const res = await request<any>("/gastos/resumen");
+
+  // Si res es un array directamente
+  if (Array.isArray(res)) {
+    const totalCalculado = res.reduce(
+      (acc, item) => acc + (item.total || 0),
+      0,
+    );
+    return { data: res, total: totalCalculado };
+  }
+
+  // Si res tiene .data
+  const lista = Array.isArray(res?.data) ? res.data : [];
+  const total =
+    typeof res?.total === "number"
+      ? res.total
+      : lista.reduce((acc: number, item: any) => acc + (item.total || 0), 0);
+
+  return {
+    data: lista,
+    total: total,
+  };
+};
