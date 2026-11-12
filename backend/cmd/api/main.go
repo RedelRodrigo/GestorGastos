@@ -35,10 +35,10 @@ func main() {
 		authHandler := auth.NewHandler(authRepo)
 		api.POST("/auth/registro", authHandler.Registrar)
 		api.POST("/auth/login", authHandler.Login)
-	}
 
-	// Rutas de gastos (asumiendo que internamente ya registran sus endpoints)
-	gastos.RouterGasto(router, database) // O agrúpalo bajo api si prefieres /api/gastos
+		// 🟢 Registramos las rutas de gastos dentro del grupo /api
+		gastos.RouterGasto(api, database)
+	}
 
 	// ==========================================
 	// 2. CONFIGURACIÓN DEL FRONTEND ESTÁTICO (SPA)

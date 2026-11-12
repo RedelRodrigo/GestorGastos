@@ -3,24 +3,19 @@ package gastos
 import (
 	"database/sql"
 
-	"github.com/gin-contrib/cors"
 	"github.com/gin-gonic/gin"
 )
 
-func RouterGasto(r *gin.Engine, db *sql.DB) {
-	// Configuración de CORS para el frontend en Vite (puerto 5173)
-	r.Use(cors.New(cors.Config{
-		AllowOrigins: []string{"http://localhost:5173"},
-		AllowMethods: []string{"GET", "POST", "PUT", "DELETE"},
-		AllowHeaders: []string{"Content-Type", "X-User-ID"}, // <- Añadido X-User-ID
-	}))
+// Cambiamos el parámetro para recibir el group /api directamente
+func RouterGasto(rg *gin.RouterGroup, db *sql.DB) {
+	// Nota: Ya no necesitamos configurar CORS aquí si ya lo maneja el router principal,
+	// o puedes dejarlo si prefieres.
 
-	// Inyección de dependencias
 	repo := NewSQLiteRepository(db)
 	h := NewHandler(repo)
 
-	// Agrupación de rutas
-	gastosGroup := r.Group("/gastos")
+	// Como rg ya viene con "/api", aquí solo definimos "/gastos" (quedando /api/gastos)
+	gastosGroup := rg.Group("/gastos")
 	{
 		gastosGroup.POST("", h.CrearGasto)
 		gastosGroup.GET("", h.ListarGastos)
