@@ -10,11 +10,12 @@ const layoutFecha = "2006-01-02"
 var ErrNoEncontrado = errors.New("gasto no encontrado")
 
 // Gasto es la entidad tal como se guarda y se devuelve en las respuestas.
+
 type Gasto struct {
-	ID          int64   `json:"id"`
-	Monto       float64 `json:"monto"`
-	Categoria   string  `json:"categoria"`
-	Fecha       string  `json:"fecha"`
+	ID          int     `json:"id"`
+	Monto       float64 `json:"monto" binding:"required,gt=0"`
+	Categoria   string  `json:"categoria" binding:"required"`
+	Fecha       string  `json:"fecha" binding:"required,datetime=2006-01-02"`
 	Descripcion string  `json:"descripcion"`
 }
 
@@ -31,7 +32,7 @@ type GastoInput struct {
 // aGasto convierte los datos de entrada en una entidad con el id indicado.
 func (in GastoInput) aGasto(id int64) Gasto {
 	return Gasto{
-		ID:          id,
+		ID:          int(id),
 		Monto:       in.Monto,
 		Categoria:   in.Categoria,
 		Fecha:       in.Fecha,

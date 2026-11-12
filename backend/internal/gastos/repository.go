@@ -8,16 +8,6 @@ import (
 	"strings"
 )
 
-package gastos
-
-import (
-"context"
-"database/sql"
-"errors"
-"fmt"
-"strings"
-)
-
 // Repositorio define qué operaciones de persistencia necesita el módulo de gastos.
 // El handler depende de esta interfaz y no de SQLite: si mañana se cambia la base
 // de datos (o se necesita un falso para tests), solo hay que escribir otra implementación.

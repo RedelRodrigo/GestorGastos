@@ -1,161 +1,135 @@
 package gastos
 
 import (
-	"database/sql"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+
+	"GestorGastos/internal/db"
 
 	"github.com/gin-gonic/gin"
 )
 
-type mockDB struct {
-	queries map[string][]map[string]interface{}
+// setupRouter inicializa la base de datos en memoria y configura las rutas para testing.
+func setupRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	// Inicia la BD SQLite en memoria
+	database := db.InitDB(":memory:")
+	t.Cleanup(func() { database.Close() })
+
+	r := gin.New()
+	RouterGasto(r, database)
+	return r
 }
 
-func (m *mockDB) Exec(query string, args ...interface{}) (sql.Result, error) {
-	if _, exists := m.queries[query]; !exists {
-		return nil, nil
+// doRequest ayuda a simular peticiones HTTP hacia el router de Gin.
+func doRequest(r http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+const gastoOK = `{"monto": 1500.5, "categoria": "Comida", "fecha": "2026-11-05", "descripcion": "Almuerzo"}`
+
+func TestCrearGasto(t *testing.T) {
+	r := setupRouter(t)
+	if w := doRequest(r, "POST", "/gastos", gastoOK); w.Code != http.StatusCreated {
+		t.Fatalf("esperaba 201, obtuve %d: %s", w.Code, w.Body)
 	}
-	// Return a mock result
-	result := &mockResult{}
-	return result, nil
 }
 
-func (m *mockDB) Query(query string, args ...interface{}) (*sql.Rows, error) {
-	if rows, exists := m.queries[query]; exists {
-		return &mockRows{rows: rows}, nil
+func TestCrearGastoInvalido(t *testing.T) {
+	r := setupRouter(t)
+	malo := `{"monto": -5, "categoria": "", "fecha": "ayer"}`
+	if w := doRequest(r, "POST", "/gastos", malo); w.Code != http.StatusBadRequest {
+		t.Fatalf("esperaba 400, obtuve %d: %s", w.Code, w.Body)
 	}
-	return nil, sql.ErrNoRows
 }
 
-func (m *mockDB) QueryRow(query string, args ...interface{}) sql.Row {
-	return &mockRow{}
-}
-
-type mockResult struct {
-	rowsAffected int64
-}
-
-func (m *mockResult) LastInsertId() (int64, error) {
-	return 1, nil
-}
-
-func (m *mockResult) RowsAffected() (int64, error) {
-	return m.rowsAffected, nil
-}
-
-type mockRows struct {
-	rows []map[string]interface{}
-	idx  int
-}
-
-func (m *mockRows) Next() bool {
-	if m.idx < len(m.rows) {
-		m.idx++
-		return true
+func TestListarVacioDevuelveArreglo(t *testing.T) {
+	r := setupRouter(t)
+	w := doRequest(r, "GET", "/gastos", "")
+	if !strings.Contains(w.Body.String(), `"data":[]`) && !strings.Contains(w.Body.String(), `"data": []`) {
+		t.Fatalf("esperaba data: [], obtuve %s", w.Body)
 	}
-	return false
 }
 
-func (m *mockRows) Close() error {
-	return nil
-}
-
-func (m *mockRows) Err() error {
-	return nil
-}
-
-func (m *mockRows) Scan(dest ...interface{}) error {
-	if m.idx-1 >= len(m.rows) {
-		return sql.ErrNoRows
+func TestEditarYBorrarInexistente(t *testing.T) {
+	r := setupRouter(t)
+	if w := doRequest(r, "PUT", "/gastos/999", gastoOK); w.Code != http.StatusNotFound {
+		t.Errorf("PUT: esperaba 404, obtuve %d: %s", w.Code, w.Body)
 	}
-	row := m.rows[m.idx-1]
-	for i, d := range dest {
-		if val, ok := row[i]; ok {
-			dest[i] = val
+
+	if w := doRequest(r, "DELETE", "/gastos/999", ""); w.Code != http.StatusNotFound {
+		t.Errorf("DELETE: esperaba 404, obtuve %d: %s", w.Code, w.Body)
+	}
+}
+func TestFlujoCompletoGasto(t *testing.T) {
+	r := setupRouter(t)
+
+	// 1. Crear gasto
+	w := doRequest(r, "POST", "/gastos", gastoOK)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST falló: esperaba 201, obtuve %d", w.Code)
+	}
+
+	// 2. Listar y verificar que existe
+	w = doRequest(r, "GET", "/gastos", "")
+	if !strings.Contains(w.Body.String(), "Almuerzo") {
+		t.Fatalf("GET falló: no encontró el gasto creado")
+	}
+
+	// 3. Editar el gasto con ID 1
+	gastoEditado := `{"monto": 2000.0, "categoria": "Comida", "fecha": "2026-11-05", "descripcion": "Almuerzo Ejecutivo"}`
+	w = doRequest(r, "PUT", "/gastos/1", gastoEditado)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT falló: esperaba 200, obtuve %d", w.Code)
+	}
+
+	// 4. Borrar el gasto con ID 1
+	w = doRequest(r, "DELETE", "/gastos/1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE falló: esperaba 200, obtuve %d", w.Code)
+	}
+
+	// 5. Verificar que la lista vuelve a estar vacía
+	w = doRequest(r, "GET", "/gastos", "")
+	if !strings.Contains(w.Body.String(), `"data":[]`) && !strings.Contains(w.Body.String(), `"data": []`) {
+		t.Fatalf("GET final falló: el arreglo debería estar vacío")
+	}
+}
+func TestFiltroCategoriaYResumen(t *testing.T) {
+	r := setupRouter(t)
+
+	// Crear gastos de distintas categorías
+	gasto1 := `{"monto": 100, "categoria": "Comida", "fecha": "2026-01-10", "descripcion": "Cena"}`
+	gasto2 := `{"monto": 300, "categoria": "Comida", "fecha": "2026-01-15", "descripcion": "Almuerzo"}`
+	gasto3 := `{"monto": 500, "categoria": "Transporte", "fecha": "2026-01-20", "descripcion": "Uber"}`
+
+	doRequest(r, "POST", "/gastos", gasto1)
+	doRequest(r, "POST", "/gastos", gasto2)
+	doRequest(r, "POST", "/gastos", gasto3)
+
+	// Probar filtro por categoría
+	w := doRequest(r, "GET", "/gastos?categoria=Comida", "")
+	if !strings.Contains(w.Body.String(), "Cena") || !strings.Contains(w.Body.String(), "Uber") == false {
+		// Verificamos que contenga comida y no el uber
+		if strings.Contains(w.Body.String(), "Uber") {
+			t.Fatalf("El filtro por categoría trajo elementos no deseados: %s", w.Body.String())
 		}
 	}
-	return nil
-}
 
-type mockRow struct {
-	scanVal interface{}
-}
-
-func (m *mockRow) Scan(dest ...interface{}) error {
-	if len(dest) > 0 {
-		dest[0] = m.scanVal
+	// Probar endpoint de resumen
+	wResumen := doRequest(r, "GET", "/gastos/resumen", "")
+	if wResumen.Code != http.StatusOK {
+		t.Fatalf("Resumen falló: esperaba 200, obtuve %d", wResumen.Code)
 	}
-	return nil
-}
-
-func setupMockDB() *mockDB {
-	mdb := &mockDB{
-		queries: make(map[string][]map[string]interface{}),
-	}
-	// Setup mock data for obtenerGastosHandler
-	mdb.queries = map[string][]map[string]interface{}{
-		"SELECT id, monto, categoria, fecha, descripcion FROM gastos": {
-			{"1", "100.50", "Alimentación", "2024-01-15", "Comida"},
-		},
-	}
-	return mdb
-}
-
-func TestCrearGastoHandler(t *testing.T) {
-	db := setupMockDB()
-	handler := crearGastosHandler(db)
-
-	c := gin.New()
-	c.Request, _ = http.NewRequest("POST", "/gastos", `{"monto":50.0,"categoria":"Transporte","fecha":"2024-01-20","descripcion":"Combustible"}`)
-	w := gin.NewResponseWriter()
-
-	handler(w, c)
-
-	if w.Code != http.StatusCreated {
-		t.Errorf("expected status Created, got %d", w.Code)
-	}
-}
-
-func TestObtenerGastosHandler(t *testing.T) {
-	db := setupMockDB()
-	handler := obtenerGastosHandler(db)
-
-	c := gin.New()
-	w := gin.NewResponseWriter()
-
-	handler(w, c)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status OK, got %d", w.Code)
-	}
-}
-
-func TestEditarGastosHandler(t *testing.T) {
-	db := setupMockDB()
-	handler := editarGastosHandler(db)
-
-	c := gin.New()
-	c.Request, _ = http.NewRequest("PUT", "/gastos/1", `{"monto":75.0,"categoria":"Alimentación","fecha":"2024-01-20","descripcion":"Comida actualizada"}`)
-	w := gin.NewResponseWriter()
-
-	handler(w, c)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status OK, got %d", w.Code)
-	}
-}
-
-func TestBorrarGastoHandler(t *testing.T) {
-	db := setupMockDB()
-	handler := borrarGastoHandler(db)
-
-	c := gin.New()
-	w := gin.NewResponseWriter()
-
-	handler(w, c)
-
-	if w.Code != http.StatusOK {
-		t.Errorf("expected status OK, got %d", w.Code)
+	if !strings.Contains(wResumen.Body.String(), `"total":900`) {
+		t.Fatalf("El total del resumen es incorrecto, obtuve: %s", wResumen.Body.String())
 	}
 }

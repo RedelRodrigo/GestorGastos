@@ -25,7 +25,7 @@ func crearGastosHandler(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		id, _ := result.LastInsertId()
-		gasto.ID = int64(int(id))
+		gasto.ID = int(id)
 
 		c.JSON(http.StatusCreated, gin.H{"data": gasto})
 	}
@@ -33,23 +33,34 @@ func crearGastosHandler(db *sql.DB) gin.HandlerFunc {
 
 func obtenerGastosHandler(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// 1. Hacemos la consulta a la base de datos
-		rows, err := db.Query("SELECT id, monto, categoria, fecha, descripcion FROM gastos")
+		query := "SELECT id, monto, categoria, fecha, COALESCE(descripcion, '') FROM gastos WHERE 1=1"
+		args := []any{}
+
+		if v := c.Query("categoria"); v != "" {
+			query += " AND categoria = ?"
+			args = append(args, v)
+		}
+		if v := c.Query("desde"); v != "" {
+			query += " AND fecha >= ?"
+			args = append(args, v)
+		}
+		if v := c.Query("hasta"); v != "" {
+			query += " AND fecha <= ?"
+			args = append(args, v)
+		}
+
+		query += " ORDER BY fecha DESC, id DESC"
+
+		rows, err := db.Query(query, args...)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
-		// ¡Muy importante! Asegurarse de cerrar las filas para liberar la conexión a la base de datos
 		defer rows.Close()
 
-		// 2. Creamos un slice (arreglo) para almacenar los gastos que vayamos leyendo
-		var gastos []Gasto
-
-		// 3. Iteramos fila por fila
+		gastos := []Gasto{}
 		for rows.Next() {
 			var g Gasto
-			// 4. Escaneamos los valores de la fila actual hacia nuestra estructura
-			// El orden en Scan debe coincidir exactamente con el orden del SELECT
 			if err := rows.Scan(&g.ID, &g.Monto, &g.Categoria, &g.Fecha, &g.Descripcion); err != nil {
 				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 				return
@@ -57,54 +68,38 @@ func obtenerGastosHandler(db *sql.DB) gin.HandlerFunc {
 			gastos = append(gastos, g)
 		}
 
-		// 5. Verificamos si ocurrió algún error durante la iteración del for
-		if err := rows.Err(); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-
-		// Si el slice es nil (porque la tabla está vacía), lo inicializamos como vacío
-		// para que el JSON devuelva [] en lugar de null
-		if gastos == nil {
-			gastos = []Gasto{}
-		}
-
-		// 6. Retornamos la lista de gastos
 		c.JSON(http.StatusOK, gin.H{"data": gastos})
 	}
 }
 
 func editarGastosHandler(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		var gasto Gasto
-
 		id, err := strconv.Atoi(c.Param("id"))
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "id inválido"})
 			return
 		}
 
+		var gasto Gasto
 		if err := c.ShouldBindJSON(&gasto); err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 			return
 		}
 
-		result, err := db.Exec(
-			"UPDATE gastos SET monto = ?, categoria = ?, fecha = ?, descripcion = ? WHERE id = ?", gasto.Monto, gasto.Categoria, gasto.Fecha, gasto.Descripcion, id)
+		query := "UPDATE gastos SET monto = ?, categoria = ?, fecha = ?, descripcion = ? WHERE id = ?"
+		res, err := db.Exec(query, gasto.Monto, gasto.Categoria, gasto.Fecha, gasto.Descripcion, id)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 			return
 		}
 
-		rows, err := result.RowsAffected()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
-			return
-		}
-		if rows == 0 {
+		rows, err := res.RowsAffected()
+		if err != nil || rows == 0 {
 			c.JSON(http.StatusNotFound, gin.H{"error": "gasto no encontrado"})
 			return
 		}
+
+		gasto.ID = id
 		c.JSON(http.StatusOK, gin.H{"data": gasto})
 	}
 }
@@ -158,4 +153,32 @@ func obtenerGastoHandlerId(database *sql.DB) gin.HandlerFunc {
 
 	}
 
+}
+
+func resumenHandler(db *sql.DB) gin.HandlerFunc {
+	type item struct {
+		Categoria string  `json:"categoria"`
+		Total     float64 `json:"total"`
+	}
+	return func(c *gin.Context) {
+		rows, err := db.Query("SELECT categoria, SUM(monto) FROM gastos GROUP BY categoria ORDER BY SUM(monto) DESC")
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+			return
+		}
+		defer rows.Close()
+
+		items := []item{}
+		var total float64
+		for rows.Next() {
+			var it item
+			if err := rows.Scan(&it.Categoria, &it.Total); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+				return
+			}
+			total += it.Total
+			items = append(items, it)
+		}
+		c.JSON(http.StatusOK, gin.H{"data": items, "total": total})
+	}
 }
