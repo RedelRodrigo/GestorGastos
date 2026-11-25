@@ -2,11 +2,14 @@ package gastos
 
 import (
 	"errors"
+	"log/slog"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 )
+
+const msgDatosInvalidos = "Datos inválidos, revisá los campos"
 
 type Handler struct {
 	repo Repository
@@ -16,27 +19,31 @@ func NewHandler(repo Repository) *Handler {
 	return &Handler{repo: repo}
 }
 
-// obtenerUsuarioID extrae el identificador del usuario desde los headers HTTP.
+// obtenerUsuarioID devuelve el email del usuario autenticado por la cookie de sesión.
+// Lo fija el middleware security.RequerirSesion; ya no se lee ningún header del cliente.
 func obtenerUsuarioID(c *gin.Context) string {
-	usuarioID := c.GetHeader("X-User-ID")
-	if usuarioID == "" {
-		return "usuario_invitado" // Fallback seguro
-	}
-	return usuarioID
+	return c.GetString("usuarioEmail")
+}
+
+// errorInterno guarda el detalle en el log del servidor y responde algo genérico.
+func errorInterno(c *gin.Context, err error) {
+	slog.ErrorContext(c.Request.Context(), "error en gastos", "ruta", c.FullPath(), "error", err)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "Ocurrió un error interno, intentá de nuevo"})
 }
 
 func (h *Handler) CrearGasto(c *gin.Context) {
 	usuarioID := obtenerUsuarioID(c)
+
 	var in GastoInput
 	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgDatosInvalidos})
 		return
 	}
 
 	gastoNuevo := in.aGasto(0)
 	id, err := h.repo.Crear(usuarioID, gastoNuevo)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errorInterno(c, err)
 		return
 	}
 
@@ -54,7 +61,7 @@ func (h *Handler) ListarGastos(c *gin.Context) {
 
 	gastos, err := h.repo.Listar(usuarioID, filtro)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errorInterno(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": gastos})
@@ -62,6 +69,7 @@ func (h *Handler) ListarGastos(c *gin.Context) {
 
 func (h *Handler) EditarGasto(c *gin.Context) {
 	usuarioID := obtenerUsuarioID(c)
+
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id inválido"})
@@ -70,18 +78,17 @@ func (h *Handler) EditarGasto(c *gin.Context) {
 
 	var in GastoInput
 	if err := c.ShouldBindJSON(&in); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgDatosInvalidos})
 		return
 	}
 
 	gastoEditado := in.aGasto(int64(id))
-	err = h.repo.Actualizar(usuarioID, id, gastoEditado)
-	if err != nil {
+	if err := h.repo.Actualizar(usuarioID, id, gastoEditado); err != nil {
 		if errors.Is(err, ErrNoEncontrado) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errorInterno(c, err)
 		return
 	}
 
@@ -90,19 +97,19 @@ func (h *Handler) EditarGasto(c *gin.Context) {
 
 func (h *Handler) BorrarGasto(c *gin.Context) {
 	usuarioID := obtenerUsuarioID(c)
+
 	id, err := strconv.Atoi(c.Param("id"))
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "id inválido"})
 		return
 	}
 
-	err = h.repo.Borrar(usuarioID, id)
-	if err != nil {
+	if err := h.repo.Borrar(usuarioID, id); err != nil {
 		if errors.Is(err, ErrNoEncontrado) {
 			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errorInterno(c, err)
 		return
 	}
 
@@ -111,9 +118,10 @@ func (h *Handler) BorrarGasto(c *gin.Context) {
 
 func (h *Handler) ObtenerResumen(c *gin.Context) {
 	usuarioID := obtenerUsuarioID(c)
+
 	items, total, err := h.repo.ObtenerResumen(usuarioID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		errorInterno(c, err)
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"data": items, "total": total})

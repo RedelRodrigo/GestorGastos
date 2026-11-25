@@ -17,11 +17,13 @@ export const registroApi = async (
   email: string,
   username: string,
   password: string,
+  captcha: string,
 ): Promise<Usuario> => {
   const res = await fetch("/api/auth/registro", {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, username, password }),
+    body: JSON.stringify({ email, username, password, captcha }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? "Error al registrar cuenta");
@@ -31,36 +33,37 @@ export const registroApi = async (
 export const loginApi = async (
   email: string,
   password: string,
+  captcha: string,
 ): Promise<Usuario> => {
   const res = await fetch("/api/auth/login", {
     method: "POST",
+    credentials: "include",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email, password, captcha }),
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(body.error ?? "Credenciales incorrectas");
   return body.data;
 };
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  const usuario = obtenerUsuarioActual();
-  const identificador = usuario ? usuario.email : "invitado";
+export const logoutApi = async (): Promise<void> => {
+  await fetch("/api/auth/logout", {
+    method: "POST",
+    credentials: "include",
+  }).catch(() => {});
+  cerrarSesionUsuario();
+};
 
+async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch("/api" + path, {
+    credentials: "include",
     headers: {
       "Content-Type": "application/json",
-      "X-User-ID": identificador,
     },
     ...init,
   });
 
   const body = await res.json().catch(() => ({}));
-
-  // 🟢 Agrega este log para ver exactamente qué responde el servidor de Go
-  console.log(
-    `[API Response] ${init?.method || "GET"} ${path} (Status: ${res.status}):`,
-    body,
-  );
 
   if (!res.ok) {
     throw new Error(
@@ -73,13 +76,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 export const listarGastos = async (query = "") => {
   const res = await request<any>(`/gastos${query}`);
 
-  // Si 'res' es un array directamente
   if (Array.isArray(res)) return res;
-
-  // Si viene envuelto en .data
   if (res && Array.isArray(res.data)) return res.data;
 
-  // Si el servidor devolvió {} u otra cosa extraña, devolvemos array vacío
   return [];
 };
 
@@ -103,7 +102,6 @@ export const borrarGasto = (id: number) =>
 export const obtenerResumen = async () => {
   const res = await request<any>("/gastos/resumen");
 
-  // Si res es un array directamente
   if (Array.isArray(res)) {
     const totalCalculado = res.reduce(
       (acc, item) => acc + (item.total || 0),
@@ -112,7 +110,6 @@ export const obtenerResumen = async () => {
     return { data: res, total: totalCalculado };
   }
 
-  // Si res tiene .data
   const lista = Array.isArray(res?.data) ? res.data : [];
   const total =
     typeof res?.total === "number"

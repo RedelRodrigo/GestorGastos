@@ -4,26 +4,25 @@
 FROM oven/bun:1 AS frontend-builder
 WORKDIR /app
 
-# Copiamos package.json y bun.lock desde la carpeta frontend local
-COPY frontend/package.json frontend/bun.lock ./
-RUN bun install
+ARG VITE_TURNSTILE_SITE_KEY
+ENV VITE_TURNSTILE_SITE_KEY=${VITE_TURNSTILE_SITE_KEY}
 
-# Copiamos el resto del código del frontend y compilamos
+COPY frontend/package.json frontend/bun.lock ./
+RUN bun install --frozen-lockfile
+
 COPY frontend/ ./
 RUN bun run build
 
 # ==========================================
 # ETAPA 2: Construir el Backend (Go)
 # ==========================================
-FROM golang:1.26-alpine AS backend-builder
+FROM golang:1.27-alpine AS backend-builder
 WORKDIR /app/backend
 
 COPY backend/go.mod backend/go.sum ./
 RUN go mod download
 
 COPY backend/ ./
-
-# Aquí copiamos desde /app/dist (que es donde bun build deja los archivos si el WORKDIR era /app)
 COPY --from=frontend-builder /app/dist ./static
 
 RUN CGO_ENABLED=0 GOOS=linux go build -ldflags="-s -w" -o /app/bin/api ./cmd/api

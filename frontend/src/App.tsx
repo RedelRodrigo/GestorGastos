@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from "react";
 import {
   borrarGasto,
   listarGastos,
+  logoutApi,
   obtenerResumen,
   obtenerUsuarioActual,
 } from "./api";
@@ -24,7 +25,6 @@ export default function App() {
   const [error, setError] = useState("");
   const [filtroCategoria, setFiltroCategoria] = useState("");
 
-  // Función dedicada exclusivamente a recargas manuales tras mutaciones (POST, PUT, DELETE)
   const refrescarDatos = useCallback(async () => {
     try {
       const query = filtroCategoria
@@ -43,7 +43,6 @@ export default function App() {
     }
   }, [filtroCategoria]);
 
-  // Efecto de sincronización: vive autocontenido con cleanup para evitar race conditions
   useEffect(() => {
     if (!sesionActiva) return;
 
@@ -88,7 +87,8 @@ export default function App() {
     }
   }
 
-  function handleLogout() {
+  async function handleLogout() {
+    await logoutApi();
     setSesionActiva(false);
     setGastos([]);
     setResumen([]);
@@ -123,7 +123,6 @@ export default function App() {
               inicial={editando}
               onGuardado={() => {
                 setEditando(null);
-                // 🟢 Damos un micro-respiro de 100ms para asegurar que Turso procese el INSERT
                 setTimeout(() => {
                   refrescarDatos();
                 }, 100);

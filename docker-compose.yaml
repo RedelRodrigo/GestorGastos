@@ -1,11 +1,15 @@
-version: '3.8'
-
 services:
   app:
     image: test-gastos-local
-    build: .
+    build:
+      context: .
+      args:
+        VITE_TURNSTILE_SITE_KEY: ${VITE_TURNSTILE_SITE_KEY}
     ports:
       - "8080:8080"
     env_file:
       - .env
+    environment:
+      - PORT=8080
+      - STATIC_DIR=/app/static
     restart: unless-stopped

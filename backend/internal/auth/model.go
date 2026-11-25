@@ -13,13 +13,17 @@ type Usuario struct {
 	Username string `json:"username"`
 }
 
+// RegistroInput: contraseña de 8 a 72 caracteres (bcrypt no usa más de 72 bytes).
 type RegistroInput struct {
-	Email    string `json:"email" binding:"required,email"`
+	Email    string `json:"email" binding:"required,email,max=254"`
 	Username string `json:"username" binding:"required,min=2,max=40"`
-	Password string `json:"password" binding:"required,min=6"`
+	Password string `json:"password" binding:"required,min=8,max=72"`
+	Captcha  string `json:"captcha" binding:"required"`
 }
 
+// LoginInput no exige 12 caracteres, así las cuentas anteriores siguen pudiendo entrar.
 type LoginInput struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Email    string `json:"email" binding:"required,email,max=254"`
+	Password string `json:"password" binding:"required,max=72"`
+	Captcha  string `json:"captcha" binding:"required"`
 }

@@ -1,0 +1,1422 @@
+This file is a merged representation of the entire codebase, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+5. Multiple file entries, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+</file_summary>
+
+<directory_structure>
+cmd/
+  api/
+    main.go
+internal/
+  auth/
+    handler.go
+    model.go
+    repository.go
+  db/
+    db_test.go
+    db.go
+  gastos/
+    handler_test.go
+    handler.go
+    model.go
+    repository.go
+    router_test.go
+    routerGasto.go
+  security/
+    headers.go
+    ratelimit.go
+    sesion.go
+    turnstile.go
+.air.toml
+go.mod
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="cmd/api/main.go">
+package main
+
+import (
+	"context"
+	"errors"
+	"log/slog"
+	"net/http"
+	"os"
+	"os/signal"
+	"strings"
+	"syscall"
+	"time"
+
+	"GestorGastos/internal/auth"
+	"GestorGastos/internal/db"
+	"GestorGastos/internal/gastos"
+	"GestorGastos/internal/security"
+
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
+)
+
+func main() {
+	if err := godotenv.Load(); err != nil {
+		slog.Info("no se encontró .env, usando variables del sistema")
+	}
+	if err := security.InicializarSecreto(); err != nil {
+		slog.Error("configuración inválida", "error", err)
+		os.Exit(1)
+	}
+
+	database := db.InitDB()
+	defer database.Close()
+
+	router := gin.Default()
+	// IP del proxy (Caddy) que está delante de la app. Solo esas IPs pueden fijar X-Forwarded-For.
+	if err := router.SetTrustedProxies([]string{"127.0.0.1", "::1"}); err != nil {
+		slog.Error("proxies confiables inválidos", "error", err)
+		os.Exit(1)
+	}
+	router.Use(security.Headers())
+
+	porIP := security.NewLimitadorLogin(20, 15*time.Minute, 15*time.Minute)
+	porCorreo := security.NewLimitadorLogin(5, 15*time.Minute, 30*time.Minute)
+
+	api := router.Group("/api")
+	{
+		api.GET("/health", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{"message": "api funcionando"})
+		})
+
+		authRepo := auth.NewSQLiteAuthRepository(database)
+		authHandler := auth.NewHandler(authRepo, porIP, porCorreo)
+		api.POST("/auth/registro", authHandler.Registrar)
+		api.POST("/auth/login", authHandler.Login)
+		api.POST("/auth/logout", authHandler.Logout)
+		api.GET("/auth/sesion", security.RequerirSesion(), authHandler.Sesion)
+
+		gastos.RouterGasto(api, database)
+	}
+
+	staticDir := getenv("STATIC_DIR", "./static")
+	router.Static("/assets", staticDir+"/assets")
+	router.StaticFile("/", staticDir+"/index.html")
+
+	// Las rutas /api inexistentes devuelven JSON; el resto cae en la SPA.
+	router.NoRoute(func(c *gin.Context) {
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Ruta no encontrada"})
+			return
+		}
+		c.File(staticDir + "/index.html")
+	})
+
+	port := getenv("PORT", "8080")
+	srv := &http.Server{
+		Addr:              ":" + port,
+		Handler:           router,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      30 * time.Second,
+		IdleTimeout:       60 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		var err error
+		if cert, key := os.Getenv("TLS_CERT"), os.Getenv("TLS_KEY"); cert != "" && key != "" {
+			slog.Info("servidor HTTPS escuchando", "puerto", port)
+			err = srv.ListenAndServeTLS(cert, key)
+		} else {
+			slog.Info("servidor HTTP escuchando (usa un proxy con HTTPS en producción)", "puerto", port)
+			err = srv.ListenAndServe()
+		}
+		if err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("servidor detenido", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	<-ctx.Done()
+	slog.Info("apagando servidor")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := srv.Shutdown(shutdownCtx); err != nil {
+		slog.Error("apagado forzado", "error", err)
+	}
+}
+
+func getenv(k, def string) string {
+	if v := os.Getenv(k); v != "" {
+		return v
+	}
+	return def
+}
+</file>
+
+<file path="internal/auth/handler.go">
+package auth
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"strings"
+
+	"GestorGastos/internal/security"
+
+	"github.com/gin-gonic/gin"
+)
+
+const msgCaptcha = "No pudimos verificar que sos una persona. Intentá de nuevo."
+
+type Handler struct {
+	repo      Repository
+	porIP     *security.LimitadorLogin
+	porCorreo *security.LimitadorLogin
+}
+
+func NewHandler(repo Repository, porIP, porCorreo *security.LimitadorLogin) *Handler {
+	return &Handler{repo: repo, porIP: porIP, porCorreo: porCorreo}
+}
+
+func (h *Handler) Registrar(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var in RegistroInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Datos inválidos. La contraseña debe tener al menos 12 caracteres."})
+		return
+	}
+	if !security.VerificarTurnstile(ctx, in.Captcha, c.ClientIP()) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgCaptcha})
+		return
+	}
+
+	usuario, err := h.repo.Registrar(in)
+	if err != nil {
+		if errors.Is(err, ErrEmailDuplicado) {
+			c.JSON(http.StatusConflict, gin.H{"error": err.Error()})
+			return
+		}
+		slog.ErrorContext(ctx, "registro", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error interno al registrar"})
+		return
+	}
+
+	if err := security.EmitirSesion(c.Writer, usuario.Email, usuario.Username); err != nil {
+		slog.ErrorContext(ctx, "emitir sesión", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error interno al registrar"})
+		return
+	}
+	c.JSON(http.StatusCreated, gin.H{"data": usuario})
+}
+
+func (h *Handler) Login(c *gin.Context) {
+	ctx := c.Request.Context()
+
+	var in LoginInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Ingresá un correo y contraseña válidos"})
+		return
+	}
+
+	ip := "ip:" + c.ClientIP()
+	correo := "correo:" + strings.ToLower(strings.TrimSpace(in.Email))
+
+	// Se revisa el límite antes de llamar a Turnstile, para no gastar verificaciones.
+	if !h.porIP.Permitir(ip) || !h.porCorreo.Permitir(correo) {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Demasiados intentos. Esperá unos minutos e intentá de nuevo."})
+		return
+	}
+	if !security.VerificarTurnstile(ctx, in.Captcha, c.ClientIP()) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgCaptcha})
+		return
+	}
+
+	usuario, err := h.repo.Login(in)
+	if err != nil {
+		if errors.Is(err, ErrCredencialesInv) {
+			h.porIP.Fallo(ip)
+			h.porCorreo.Fallo(correo)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": err.Error()})
+			return
+		}
+		slog.ErrorContext(ctx, "login", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error interno al iniciar sesión"})
+		return
+	}
+
+	h.porCorreo.Exito(correo)
+	if err := security.EmitirSesion(c.Writer, usuario.Email, usuario.Username); err != nil {
+		slog.ErrorContext(ctx, "emitir sesión", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Error interno al iniciar sesión"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": usuario})
+}
+
+func (h *Handler) Sesion(c *gin.Context) {
+	id := c.MustGet("usuario").(*security.Identidad)
+	c.JSON(http.StatusOK, gin.H{"data": gin.H{"email": id.Email, "username": id.Username}})
+}
+
+func (h *Handler) Logout(c *gin.Context) {
+	security.CerrarSesion(c.Writer)
+	c.JSON(http.StatusOK, gin.H{"mensaje": "sesión cerrada"})
+}
+</file>
+
+<file path="internal/auth/model.go">
+package auth
+
+import "errors"
+
+var (
+	ErrEmailDuplicado  = errors.New("el correo electrónico ya está registrado")
+	ErrCredencialesInv = errors.New("correo o contraseña incorrectos")
+)
+
+type Usuario struct {
+	ID       int    `json:"id"`
+	Email    string `json:"email"`
+	Username string `json:"username"`
+}
+
+// RegistroInput: contraseña de 8 a 72 caracteres (bcrypt no usa más de 72 bytes).
+type RegistroInput struct {
+	Email    string `json:"email" binding:"required,email,max=254"`
+	Username string `json:"username" binding:"required,min=2,max=40"`
+	Password string `json:"password" binding:"required,min=8,max=72"`
+	Captcha  string `json:"captcha" binding:"required"`
+}
+
+// LoginInput no exige 12 caracteres, así las cuentas anteriores siguen pudiendo entrar.
+type LoginInput struct {
+	Email    string `json:"email" binding:"required,email,max=254"`
+	Password string `json:"password" binding:"required,max=72"`
+	Captcha  string `json:"captcha" binding:"required"`
+}
+</file>
+
+<file path="internal/auth/repository.go">
+package auth
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+	"strings"
+
+	"golang.org/x/crypto/bcrypt"
+)
+
+type Repository interface {
+	Registrar(in RegistroInput) (Usuario, error)
+	Login(in LoginInput) (Usuario, error)
+}
+
+type sqliteAuthRepository struct {
+	db *sql.DB
+}
+
+func NewSQLiteAuthRepository(db *sql.DB) Repository {
+	return &sqliteAuthRepository{db: db}
+}
+
+func (r *sqliteAuthRepository) Registrar(in RegistroInput) (Usuario, error) {
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	username := strings.TrimSpace(in.Username)
+
+	// Generar hash seguro de la contraseña
+	hashBytes, err := bcrypt.GenerateFromPassword([]byte(in.Password), bcrypt.DefaultCost)
+	if err != nil {
+		return Usuario{}, fmt.Errorf("error al cifrar contraseña: %w", err)
+	}
+
+	query := "INSERT INTO usuarios (email, username, password_hash) VALUES (?, ?, ?)"
+	res, err := r.db.Exec(query, email, username, string(hashBytes))
+	if err != nil {
+		// Verificamos si el error es por duplicidad de email (UNIQUE constraint)
+		if strings.Contains(err.Error(), "UNIQUE") || strings.Contains(err.Error(), "unique") {
+			return Usuario{}, ErrEmailDuplicado
+		}
+		return Usuario{}, fmt.Errorf("error al registrar usuario: %w", err)
+	}
+
+	id, err := res.LastInsertId()
+	if err != nil {
+		return Usuario{}, fmt.Errorf("error al obtener ID: %w", err)
+	}
+
+	return Usuario{
+		ID:       int(id),
+		Email:    email,
+		Username: username,
+	}, nil
+}
+
+func (r *sqliteAuthRepository) Login(in LoginInput) (Usuario, error) {
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+
+	var id int
+	var username, passwordHash string
+
+	query := "SELECT id, username, password_hash FROM usuarios WHERE email = ?"
+	err := r.db.QueryRow(query, email).Scan(&id, &username, &passwordHash)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return Usuario{}, ErrCredencialesInv
+		}
+		return Usuario{}, fmt.Errorf("error al consultar usuario: %w", err)
+	}
+
+	// Validar la contraseña contra el hash almacenado
+	err = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(in.Password))
+	if err != nil {
+		return Usuario{}, ErrCredencialesInv
+	}
+
+	return Usuario{
+		ID:       id,
+		Email:    email,
+		Username: username,
+	}, nil
+}
+</file>
+
+<file path="internal/db/db_test.go">
+package db
+
+import "testing"
+
+func TestAbrir_CreaEsquema(t *testing.T) {
+	database, err := Abrir(":memory:")
+	if err != nil {
+		t.Fatalf("Abrir devolvió error: %v", err)
+	}
+	defer database.Close()
+
+	// Si la tabla existe, esta consulta funciona aunque no haya filas.
+	var cantidad int
+	if err := database.QueryRow("SELECT COUNT(*) FROM gastos").Scan(&cantidad); err != nil {
+		t.Fatalf("la tabla gastos no existe: %v", err)
+	}
+	if cantidad != 0 {
+		t.Errorf("esperaba 0 filas, obtuve %d", cantidad)
+	}
+}
+</file>
+
+<file path="internal/db/db.go">
+package db
+
+import (
+	"database/sql"
+	"log/slog"
+	"os"
+
+	// Driver oficial de Turso (libsql) puro en Go, sin CGO
+	_ "github.com/tursodatabase/libsql-client-go/libsql"
+)
+
+func InitDB() *sql.DB {
+	url := os.Getenv("TURSO_DATABASE_URL")
+	authToken := os.Getenv("TURSO_AUTH_TOKEN")
+
+	var connStr string
+
+	// Si no hay variables de Turso, usa SQLite local (útil para desarrollo en tu PC)
+	if url == "" {
+		dbPath := os.Getenv("DB_PATH")
+		if dbPath == "" {
+			dbPath = "gastos.db"
+		}
+		connStr = "file:" + dbPath
+	} else {
+		// Conexión remota a Turso en la nube
+		connStr = url
+		if authToken != "" {
+			connStr = url + "?authToken=" + authToken
+		}
+	}
+
+	// Nunca registrar connStr: puede contener el token de Turso.
+	db, err := sql.Open("libsql", connStr)
+	if err != nil {
+		slog.Error("no se pudo abrir la base de datos", "error", err)
+		os.Exit(1)
+	}
+
+	if url == "" {
+		db.SetMaxOpenConns(1)
+	}
+
+	// Esquema inicial de tablas
+	const esquema = `
+	CREATE TABLE IF NOT EXISTS usuarios (
+		id            INTEGER PRIMARY KEY AUTOINCREMENT,
+		email         TEXT UNIQUE NOT NULL,
+		username      TEXT NOT NULL,
+		password_hash TEXT NOT NULL
+	);
+
+	CREATE TABLE IF NOT EXISTS gastos (
+		id          INTEGER PRIMARY KEY AUTOINCREMENT,
+		usuario_id  TEXT NOT NULL,
+		monto       REAL NOT NULL,
+		categoria   TEXT NOT NULL,
+		fecha       TEXT NOT NULL,
+		descripcion TEXT
+	);
+
+	CREATE INDEX IF NOT EXISTS idx_gastos_usuario ON gastos(usuario_id);
+	CREATE INDEX IF NOT EXISTS idx_gastos_fecha ON gastos(fecha);
+	`
+
+	if _, err := db.Exec(esquema); err != nil {
+		slog.Error("no se pudo crear el esquema de la base de datos", "error", err)
+		os.Exit(1)
+	}
+
+	slog.Info("base de datos inicializada correctamente")
+	return db
+}
+</file>
+
+<file path="internal/gastos/handler_test.go">
+package gastos
+
+import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"GestorGastos/internal/db"
+
+	"github.com/gin-gonic/gin"
+)
+
+// setupRouter inicializa la base de datos en memoria y configura las rutas para testing.
+func setupRouter(t *testing.T) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	// Inicia la BD SQLite en memoria
+	database := db.InitDB(":memory:")
+	t.Cleanup(func() { database.Close() })
+
+	r := gin.New()
+	RouterGasto(r, database)
+	return r
+}
+
+// doRequest ayuda a simular peticiones HTTP hacia el router de Gin.
+func doRequest(r http.Handler, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+const gastoOK = `{"monto": 1500.5, "categoria": "Comida", "fecha": "2026-11-05", "descripcion": "Almuerzo"}`
+
+func TestCrearGasto(t *testing.T) {
+	r := setupRouter(t)
+	if w := doRequest(r, "POST", "/gastos", gastoOK); w.Code != http.StatusCreated {
+		t.Fatalf("esperaba 201, obtuve %d: %s", w.Code, w.Body)
+	}
+}
+
+func TestCrearGastoInvalido(t *testing.T) {
+	r := setupRouter(t)
+	malo := `{"monto": -5, "categoria": "", "fecha": "ayer"}`
+	if w := doRequest(r, "POST", "/gastos", malo); w.Code != http.StatusBadRequest {
+		t.Fatalf("esperaba 400, obtuve %d: %s", w.Code, w.Body)
+	}
+}
+
+func TestListarVacioDevuelveArreglo(t *testing.T) {
+	r := setupRouter(t)
+	w := doRequest(r, "GET", "/gastos", "")
+	if !strings.Contains(w.Body.String(), `"data":[]`) && !strings.Contains(w.Body.String(), `"data": []`) {
+		t.Fatalf("esperaba data: [], obtuve %s", w.Body)
+	}
+}
+
+func TestEditarYBorrarInexistente(t *testing.T) {
+	r := setupRouter(t)
+	if w := doRequest(r, "PUT", "/gastos/999", gastoOK); w.Code != http.StatusNotFound {
+		t.Errorf("PUT: esperaba 404, obtuve %d: %s", w.Code, w.Body)
+	}
+
+	if w := doRequest(r, "DELETE", "/gastos/999", ""); w.Code != http.StatusNotFound {
+		t.Errorf("DELETE: esperaba 404, obtuve %d: %s", w.Code, w.Body)
+	}
+}
+func TestFlujoCompletoGasto(t *testing.T) {
+	r := setupRouter(t)
+
+	// 1. Crear gasto
+	w := doRequest(r, "POST", "/gastos", gastoOK)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("POST falló: esperaba 201, obtuve %d", w.Code)
+	}
+
+	// 2. Listar y verificar que existe
+	w = doRequest(r, "GET", "/gastos", "")
+	if !strings.Contains(w.Body.String(), "Almuerzo") {
+		t.Fatalf("GET falló: no encontró el gasto creado")
+	}
+
+	// 3. Editar el gasto con ID 1
+	gastoEditado := `{"monto": 2000.0, "categoria": "Comida", "fecha": "2026-11-05", "descripcion": "Almuerzo Ejecutivo"}`
+	w = doRequest(r, "PUT", "/gastos/1", gastoEditado)
+	if w.Code != http.StatusOK {
+		t.Fatalf("PUT falló: esperaba 200, obtuve %d", w.Code)
+	}
+
+	// 4. Borrar el gasto con ID 1
+	w = doRequest(r, "DELETE", "/gastos/1", "")
+	if w.Code != http.StatusOK {
+		t.Fatalf("DELETE falló: esperaba 200, obtuve %d", w.Code)
+	}
+
+	// 5. Verificar que la lista vuelve a estar vacía
+	w = doRequest(r, "GET", "/gastos", "")
+	if !strings.Contains(w.Body.String(), `"data":[]`) && !strings.Contains(w.Body.String(), `"data": []`) {
+		t.Fatalf("GET final falló: el arreglo debería estar vacío")
+	}
+}
+func TestFiltroCategoriaYResumen(t *testing.T) {
+	r := setupRouter(t)
+
+	// Crear gastos de distintas categorías
+	gasto1 := `{"monto": 100, "categoria": "Comida", "fecha": "2026-01-10", "descripcion": "Cena"}`
+	gasto2 := `{"monto": 300, "categoria": "Comida", "fecha": "2026-01-15", "descripcion": "Almuerzo"}`
+	gasto3 := `{"monto": 500, "categoria": "Transporte", "fecha": "2026-01-20", "descripcion": "Uber"}`
+
+	doRequest(r, "POST", "/gastos", gasto1)
+	doRequest(r, "POST", "/gastos", gasto2)
+	doRequest(r, "POST", "/gastos", gasto3)
+
+	// Probar filtro por categoría
+	w := doRequest(r, "GET", "/gastos?categoria=Comida", "")
+	if !strings.Contains(w.Body.String(), "Cena") || !strings.Contains(w.Body.String(), "Uber") == false {
+		// Verificamos que contenga comida y no el uber
+		if strings.Contains(w.Body.String(), "Uber") {
+			t.Fatalf("El filtro por categoría trajo elementos no deseados: %s", w.Body.String())
+		}
+	}
+
+	// Probar endpoint de resumen
+	wResumen := doRequest(r, "GET", "/gastos/resumen", "")
+	if wResumen.Code != http.StatusOK {
+		t.Fatalf("Resumen falló: esperaba 200, obtuve %d", wResumen.Code)
+	}
+	if !strings.Contains(wResumen.Body.String(), `"total":900`) {
+		t.Fatalf("El total del resumen es incorrecto, obtuve: %s", wResumen.Body.String())
+	}
+}
+</file>
+
+<file path="internal/gastos/handler.go">
+package gastos
+
+import (
+	"errors"
+	"log/slog"
+	"net/http"
+	"strconv"
+
+	"github.com/gin-gonic/gin"
+)
+
+const msgDatosInvalidos = "Datos inválidos, revisá los campos"
+
+type Handler struct {
+	repo Repository
+}
+
+func NewHandler(repo Repository) *Handler {
+	return &Handler{repo: repo}
+}
+
+// obtenerUsuarioID devuelve el email del usuario autenticado por la cookie de sesión.
+// Lo fija el middleware security.RequerirSesion; ya no se lee ningún header del cliente.
+func obtenerUsuarioID(c *gin.Context) string {
+	return c.GetString("usuarioEmail")
+}
+
+// errorInterno guarda el detalle en el log del servidor y responde algo genérico.
+func errorInterno(c *gin.Context, err error) {
+	slog.ErrorContext(c.Request.Context(), "error en gastos", "ruta", c.FullPath(), "error", err)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "Ocurrió un error interno, intentá de nuevo"})
+}
+
+func (h *Handler) CrearGasto(c *gin.Context) {
+	usuarioID := obtenerUsuarioID(c)
+
+	var in GastoInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgDatosInvalidos})
+		return
+	}
+
+	gastoNuevo := in.aGasto(0)
+	id, err := h.repo.Crear(usuarioID, gastoNuevo)
+	if err != nil {
+		errorInterno(c, err)
+		return
+	}
+
+	gastoNuevo.ID = id
+	c.JSON(http.StatusCreated, gin.H{"data": gastoNuevo})
+}
+
+func (h *Handler) ListarGastos(c *gin.Context) {
+	usuarioID := obtenerUsuarioID(c)
+	filtro := Filtro{
+		Categoria: c.Query("categoria"),
+		Desde:     c.Query("desde"),
+		Hasta:     c.Query("hasta"),
+	}
+
+	gastos, err := h.repo.Listar(usuarioID, filtro)
+	if err != nil {
+		errorInterno(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": gastos})
+}
+
+func (h *Handler) EditarGasto(c *gin.Context) {
+	usuarioID := obtenerUsuarioID(c)
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id inválido"})
+		return
+	}
+
+	var in GastoInput
+	if err := c.ShouldBindJSON(&in); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": msgDatosInvalidos})
+		return
+	}
+
+	gastoEditado := in.aGasto(int64(id))
+	if err := h.repo.Actualizar(usuarioID, id, gastoEditado); err != nil {
+		if errors.Is(err, ErrNoEncontrado) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		errorInterno(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": gastoEditado})
+}
+
+func (h *Handler) BorrarGasto(c *gin.Context) {
+	usuarioID := obtenerUsuarioID(c)
+
+	id, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "id inválido"})
+		return
+	}
+
+	if err := h.repo.Borrar(usuarioID, id); err != nil {
+		if errors.Is(err, ErrNoEncontrado) {
+			c.JSON(http.StatusNotFound, gin.H{"error": err.Error()})
+			return
+		}
+		errorInterno(c, err)
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"mensaje": "gasto eliminado correctamente"})
+}
+
+func (h *Handler) ObtenerResumen(c *gin.Context) {
+	usuarioID := obtenerUsuarioID(c)
+
+	items, total, err := h.repo.ObtenerResumen(usuarioID)
+	if err != nil {
+		errorInterno(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": items, "total": total})
+}
+</file>
+
+<file path="internal/gastos/model.go">
+package gastos
+
+import "errors"
+
+// layoutFecha es el formato de fecha que usa toda la API: AAAA-MM-DD (ISO 8601).
+// Al ser ISO, ordenar y comparar fechas como texto funciona correctamente.
+const layoutFecha = "2006-01-02"
+
+// ErrNoEncontrado se devuelve cuando un gasto con ese id no existe.
+var ErrNoEncontrado = errors.New("gasto no encontrado")
+
+// Gasto es la entidad tal como se guarda y se devuelve en las respuestas.
+type Gasto struct {
+	ID          int     `json:"id"`
+	Monto       float64 `json:"monto"`
+	Categoria   string  `json:"categoria"`
+	Fecha       string  `json:"fecha"`
+	Descripcion string  `json:"descripcion"`
+}
+
+// GastoInput son los datos que envía el cliente al crear o editar un gasto.
+// Está separado de Gasto para que el cliente nunca pueda fijar el id
+// y para concentrar las reglas de validación en un solo lugar.
+type GastoInput struct {
+	Monto       float64 `json:"monto" binding:"required,gt=0,lte=1000000000"`
+	Categoria   string  `json:"categoria" binding:"required,max=50"`
+	Fecha       string  `json:"fecha" binding:"required,datetime=2006-01-02"` // debe coincidir con layoutFecha
+	Descripcion string  `json:"descripcion" binding:"max=500"`
+}
+
+// aGasto convierte los datos de entrada en una entidad con el id indicado.
+func (in GastoInput) aGasto(id int64) Gasto {
+	return Gasto{
+		ID:          int(id),
+		Monto:       in.Monto,
+		Categoria:   in.Categoria,
+		Fecha:       in.Fecha,
+		Descripcion: in.Descripcion,
+	}
+}
+
+// Filtro permite acotar el listado de gastos. Los campos vacíos se ignoran.
+type Filtro struct {
+	Categoria string
+	Desde     string // inclusive, AAAA-MM-DD
+	Hasta     string // inclusive, AAAA-MM-DD
+}
+
+// TotalCategoria es una fila del resumen de gastos agrupado por categoría.
+type TotalCategoria struct {
+	Categoria string  `json:"categoria"`
+	Total     float64 `json:"total"`
+}
+</file>
+
+<file path="internal/gastos/repository.go">
+package gastos
+
+import (
+	"database/sql"
+	"fmt"
+)
+
+type Repository interface {
+	Crear(usuarioID string, g Gasto) (int, error)
+	Listar(usuarioID string, f Filtro) ([]Gasto, error)
+	Actualizar(usuarioID string, id int, g Gasto) error
+	Borrar(usuarioID string, id int) error
+	ObtenerResumen(usuarioID string) ([]TotalCategoria, float64, error)
+}
+
+type sqliteRepository struct {
+	db *sql.DB
+}
+
+func NewSQLiteRepository(db *sql.DB) Repository {
+	return &sqliteRepository{db: db}
+}
+
+func (r *sqliteRepository) Crear(usuarioID string, g Gasto) (int, error) {
+	query := "INSERT INTO gastos (usuario_id, monto, categoria, fecha, descripcion) VALUES (?, ?, ?, ?, ?)"
+	res, err := r.db.Exec(query, usuarioID, g.Monto, g.Categoria, g.Fecha, g.Descripcion)
+	if err != nil {
+		return 0, fmt.Errorf("error al insertar gasto: %w", err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("error al obtener ID: %w", err)
+	}
+	return int(id), nil
+}
+
+func (r *sqliteRepository) Listar(usuarioID string, f Filtro) ([]Gasto, error) {
+	query := "SELECT id, monto, categoria, fecha, COALESCE(descripcion, '') FROM gastos WHERE usuario_id = ?"
+	args := []any{usuarioID}
+
+	if f.Categoria != "" {
+		query += " AND categoria = ?"
+		args = append(args, f.Categoria)
+	}
+	if f.Desde != "" {
+		query += " AND fecha >= ?"
+		args = append(args, f.Desde)
+	}
+	if f.Hasta != "" {
+		query += " AND fecha <= ?"
+		args = append(args, f.Hasta)
+	}
+
+	query += " ORDER BY fecha DESC, id DESC"
+
+	rows, err := r.db.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("error al listar gastos: %w", err)
+	}
+	defer rows.Close()
+
+	gastos := []Gasto{}
+	for rows.Next() {
+		var g Gasto
+		if err := rows.Scan(&g.ID, &g.Monto, &g.Categoria, &g.Fecha, &g.Descripcion); err != nil {
+			return nil, fmt.Errorf("error al escanear gasto: %w", err)
+		}
+		gastos = append(gastos, g)
+	}
+	return gastos, nil
+}
+
+func (r *sqliteRepository) Actualizar(usuarioID string, id int, g Gasto) error {
+	query := "UPDATE gastos SET monto = ?, categoria = ?, fecha = ?, descripcion = ? WHERE id = ? AND usuario_id = ?"
+	res, err := r.db.Exec(query, g.Monto, g.Categoria, g.Fecha, g.Descripcion, id, usuarioID)
+	if err != nil {
+		return fmt.Errorf("error al actualizar: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil || rows == 0 {
+		return ErrNoEncontrado
+	}
+	return nil
+}
+
+func (r *sqliteRepository) Borrar(usuarioID string, id int) error {
+	query := "DELETE FROM gastos WHERE id = ? AND usuario_id = ?"
+	res, err := r.db.Exec(query, id, usuarioID)
+	if err != nil {
+		return fmt.Errorf("error al borrar: %w", err)
+	}
+	rows, err := res.RowsAffected()
+	if err != nil || rows == 0 {
+		return ErrNoEncontrado
+	}
+	return nil
+}
+
+func (r *sqliteRepository) ObtenerResumen(usuarioID string) ([]TotalCategoria, float64, error) {
+	query := "SELECT categoria, SUM(monto) FROM gastos WHERE usuario_id = ? GROUP BY categoria ORDER BY SUM(monto) DESC"
+	rows, err := r.db.Query(query, usuarioID)
+	if err != nil {
+		return nil, 0, fmt.Errorf("error al obtener resumen: %w", err)
+	}
+	defer rows.Close()
+
+	items := []TotalCategoria{}
+	var total float64
+	for rows.Next() {
+		var it TotalCategoria
+		if err := rows.Scan(&it.Categoria, &it.Total); err != nil {
+			return nil, 0, fmt.Errorf("error al escanear resumen: %w", err)
+		}
+		total += it.Total
+		items = append(items, it)
+	}
+	return items, total, nil
+}
+</file>
+
+<file path="internal/gastos/router_test.go">
+package gastos
+
+import (
+	"testing"
+)
+
+func TestGastoStruct(t *testing.T) {
+	g := Gasto{
+		ID:        1,
+		Monto:     50.0,
+		Fecha:     "2024-01-01",
+		Categoria: "Test",
+	}
+
+	if g.ID != 1 {
+		t.Errorf("expected ID 1, got %d", g.ID)
+	}
+	if g.Monto != 50.0 {
+		t.Errorf("expected Monto 50, got %f", g.Monto)
+	}
+	if g.Categoria != "Test" {
+		t.Errorf("expected Categoria Test, got %s", g.Categoria)
+	}
+}
+</file>
+
+<file path="internal/gastos/routerGasto.go">
+package gastos
+
+import (
+	"database/sql"
+
+	"GestorGastos/internal/security"
+
+	"github.com/gin-gonic/gin"
+)
+
+// RouterGasto registra las rutas de /api/gastos. Todas exigen sesión válida:
+// sin cookie firmada, el middleware responde 401 y el handler nunca se ejecuta.
+func RouterGasto(rg *gin.RouterGroup, db *sql.DB) {
+	repo := NewSQLiteRepository(db)
+	h := NewHandler(repo)
+
+	gastosGroup := rg.Group("/gastos", security.RequerirSesion())
+	{
+		gastosGroup.POST("", h.CrearGasto)
+		gastosGroup.GET("", h.ListarGastos)
+		gastosGroup.GET("/resumen", h.ObtenerResumen)
+		gastosGroup.PUT("/:id", h.EditarGasto)
+		gastosGroup.DELETE("/:id", h.BorrarGasto)
+	}
+}
+</file>
+
+<file path="internal/security/headers.go">
+package security
+
+import (
+	"strings"
+
+	"github.com/gin-gonic/gin"
+)
+
+func Headers() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		h := c.Writer.Header()
+		h.Set("Strict-Transport-Security", "max-age=31536000; includeSubDomains")
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Cross-Origin-Opener-Policy", "same-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()")
+		h.Set("Content-Security-Policy",
+			"default-src 'self'; "+
+				"script-src 'self' https://challenges.cloudflare.com; "+
+				"style-src 'self' 'unsafe-inline'; "+
+				"img-src 'self' data:; "+
+				"connect-src 'self'; "+
+				"frame-src https://challenges.cloudflare.com; "+
+				"frame-ancestors 'none'; object-src 'none'; base-uri 'self'; form-action 'self'")
+
+		// Los datos financieros nunca deben quedar en caché del navegador o de un proxy.
+		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
+			h.Set("Cache-Control", "no-store")
+		}
+		c.Next()
+	}
+}
+</file>
+
+<file path="internal/security/ratelimit.go">
+package security
+
+import (
+	"sync"
+	"time"
+)
+
+type registro struct {
+	cuenta        int
+	ventanaInicio time.Time
+	bloqueoHasta  time.Time
+}
+
+// LimitadorLogin cuenta fallos por clave (IP o correo) y bloquea temporalmente.
+// Vive en memoria: sirve para una sola instancia. Con varias, usa Redis.
+type LimitadorLogin struct {
+	mu          sync.Mutex
+	registros   map[string]*registro
+	maxIntentos int
+	ventana     time.Duration
+	bloqueo     time.Duration
+}
+
+const maxRegistros = 10_000
+
+func NewLimitadorLogin(maxIntentos int, ventana, bloqueo time.Duration) *LimitadorLogin {
+	return &LimitadorLogin{
+		registros:   make(map[string]*registro),
+		maxIntentos: maxIntentos,
+		ventana:     ventana,
+		bloqueo:     bloqueo,
+	}
+}
+
+func (l *LimitadorLogin) Permitir(clave string) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r, ok := l.registros[clave]
+	return !ok || !time.Now().Before(r.bloqueoHasta)
+}
+
+func (l *LimitadorLogin) Fallo(clave string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	ahora := time.Now()
+	r, ok := l.registros[clave]
+	if !ok || ahora.Sub(r.ventanaInicio) > l.ventana {
+		r = &registro{ventanaInicio: ahora}
+		l.registros[clave] = r
+	}
+	r.cuenta++
+	if r.cuenta >= l.maxIntentos {
+		r.bloqueoHasta = ahora.Add(l.bloqueo)
+		r.cuenta = 0
+		r.ventanaInicio = ahora
+	}
+	if len(l.registros) > maxRegistros {
+		l.podar(ahora)
+	}
+}
+
+func (l *LimitadorLogin) Exito(clave string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.registros, clave)
+}
+
+// podar elimina registros que ya no bloquean ni están dentro de la ventana.
+func (l *LimitadorLogin) podar(ahora time.Time) {
+	for k, r := range l.registros {
+		if !ahora.Before(r.bloqueoHasta) && ahora.Sub(r.ventanaInicio) > l.ventana {
+			delete(l.registros, k)
+		}
+	}
+}
+</file>
+
+<file path="internal/security/sesion.go">
+package security
+
+import (
+	"errors"
+	"net/http"
+	"os"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+)
+
+const (
+	nombreCookie   = "sesion"
+	duracionSesion = 8 * time.Hour
+	emisor         = "gestor-gastos"
+)
+
+var secreto []byte
+
+type Identidad struct {
+	Email    string `json:"email"`
+	Username string `json:"username"`
+	jwt.RegisteredClaims
+}
+
+// InicializarSecreto carga JWT_SECRET y falla si es débil.
+// Generarlo con: openssl rand -base64 48
+func InicializarSecreto() error {
+	s := os.Getenv("JWT_SECRET")
+	if len(s) < 32 {
+		return errors.New("JWT_SECRET debe tener al menos 32 caracteres")
+	}
+	secreto = []byte(s)
+	return nil
+}
+
+// EmitirSesion guarda el token en una cookie HttpOnly, Secure y SameSite=Strict.
+func EmitirSesion(w http.ResponseWriter, email, username string) error {
+	ahora := time.Now()
+	token, err := jwt.NewWithClaims(jwt.SigningMethodHS256, Identidad{
+		Email:    email,
+		Username: username,
+		RegisteredClaims: jwt.RegisteredClaims{
+			Issuer:    emisor,
+			Subject:   email,
+			IssuedAt:  jwt.NewNumericDate(ahora),
+			ExpiresAt: jwt.NewNumericDate(ahora.Add(duracionSesion)),
+		},
+	}).SignedString(secreto)
+	if err != nil {
+		return err
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     nombreCookie,
+		Value:    token,
+		Path:     "/",
+		MaxAge:   int(duracionSesion.Seconds()),
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+	return nil
+}
+
+func CerrarSesion(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     nombreCookie,
+		Value:    "",
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   true,
+		SameSite: http.SameSiteStrictMode,
+	})
+}
+
+// RequerirSesion valida la cookie. El email del contexto es la única identidad.
+func RequerirSesion() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		cookie, err := c.Request.Cookie(nombreCookie)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Tenés que iniciar sesión"})
+			return
+		}
+		id := &Identidad{}
+		_, err = jwt.ParseWithClaims(cookie.Value, id,
+			func(*jwt.Token) (any, error) { return secreto, nil },
+			jwt.WithValidMethods([]string{jwt.SigningMethodHS256.Alg()}),
+			jwt.WithExpirationRequired(),
+			jwt.WithIssuer(emisor),
+			jwt.WithIssuedAt(),
+		)
+		if err != nil {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "Tu sesión venció, volvé a iniciar sesión"})
+			return
+		}
+		c.Set("usuario", id)
+		c.Set("usuarioEmail", id.Email)
+		c.Next()
+	}
+}
+</file>
+
+<file path="internal/security/turnstile.go">
+package security
+
+import (
+	"context"
+	"encoding/json"
+	"log/slog"
+	"net/http"
+	"net/url"
+	"os"
+	"strings"
+	"time"
+)
+
+const siteverifyURL = "https://challenges.cloudflare.com/turnstile/v0/siteverify"
+
+var clienteTurnstile = &http.Client{Timeout: 5 * time.Second}
+
+// VerificarTurnstile valida el token con Cloudflare. Ante cualquier error devuelve false.
+func VerificarTurnstile(ctx context.Context, token, ip string) bool {
+	secret := os.Getenv("TURNSTILE_SECRET")
+	if secret == "" || token == "" {
+		return false
+	}
+
+	form := url.Values{"secret": {secret}, "response": {token}, "remoteip": {ip}}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, siteverifyURL,
+		strings.NewReader(form.Encode()))
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+
+	resp, err := clienteTurnstile.Do(req)
+	if err != nil {
+		slog.WarnContext(ctx, "turnstile no respondió", "error", err)
+		return false
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		slog.WarnContext(ctx, "turnstile status inesperado", "status", resp.StatusCode)
+		return false
+	}
+
+	var r struct {
+		Success    bool     `json:"success"`
+		ErrorCodes []string `json:"error-codes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return false
+	}
+	if !r.Success {
+		slog.InfoContext(ctx, "turnstile rechazado", "codigos", r.ErrorCodes)
+	}
+	return r.Success
+}
+</file>
+
+<file path=".air.toml">
+#:schema https://json.schemastore.org/any.json
+
+env_files = []
+root = "."
+testdata_dir = "testdata"
+tmp_dir = "tmp"
+
+[build]
+  args_bin = []
+  bin = "./tmp/main"
+  cmd = "go build -o ./tmp/main ./cmd/api"
+  delay = 1000
+  entrypoint = ["./tmp/main"]
+  exclude_dir = ["assets", "tmp", "vendor", "testdata"]
+  exclude_file = []
+  exclude_regex = ["_test.go"]
+  exclude_unchanged = false
+  follow_symlink = false
+  full_bin = ""
+  ignore_dangerous_root_dir = false
+  include_dir = []
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  include_file = []
+  kill_delay = "0s"
+  log = "build-errors.log"
+  poll = false
+  poll_interval = 0
+  post_cmd = []
+  pre_cmd = []
+  rerun = false
+  rerun_delay = 500
+  send_interrupt = false
+  stop_on_error = false
+
+  [build.windows]
+    args_bin = []
+    bin = "tmp\\main.exe"
+    cmd = "go build -o ./tmp/main.exe ./cmd/api"
+    entrypoint = ["tmp\\main.exe"]
+    full_bin = ""
+    post_cmd = []
+    pre_cmd = []
+
+[color]
+  app = ""
+  build = "yellow"
+  main = "magenta"
+  mode = ""
+  runner = "green"
+  watcher = "cyan"
+
+[log]
+  main_only = false
+  silent = false
+  time = false
+
+[misc]
+  clean_on_exit = false
+
+[proxy]
+  app_port = 0
+  app_start_timeout = 0
+  enabled = false
+  proxy_port = 0
+
+[screen]
+  clear_on_rebuild = false
+  keep_scroll = true
+</file>
+
+<file path="go.mod">
+module GestorGastos
+
+go 1.27.4
+
+require (
+	github.com/gin-gonic/gin v1.12.0
+	github.com/joho/godotenv v1.5.1
+	github.com/tursodatabase/libsql-client-go v0.0.0-20260528064733-9d5d30a29a60
+	golang.org/x/crypto v0.59.0
+)
+
+require (
+	github.com/antlr4-go/antlr/v4 v4.13.1 // indirect
+	github.com/bytedance/gopkg v0.1.4 // indirect
+	github.com/bytedance/sonic v1.15.5 // indirect
+	github.com/bytedance/sonic/loader v0.5.3 // indirect
+	github.com/cloudwego/base64x v0.1.7 // indirect
+	github.com/coder/websocket v1.8.15 // indirect
+	github.com/gabriel-vasile/mimetype v1.4.16 // indirect
+	github.com/gin-contrib/sse v1.2.1 // indirect
+	github.com/go-playground/locales v0.14.2 // indirect
+	github.com/go-playground/universal-translator v0.18.2 // indirect
+	github.com/go-playground/validator/v10 v10.30.6 // indirect
+	github.com/goccy/go-json v0.12.0 // indirect
+	github.com/goccy/go-yaml v1.19.2 // indirect
+	github.com/golang-jwt/jwt/v5 v5.3.1 // indirect
+	github.com/json-iterator/go v1.1.12 // indirect
+	github.com/klauspost/cpuid/v2 v2.4.2 // indirect
+	github.com/leodido/go-urn v1.5.0 // indirect
+	github.com/mattn/go-isatty v0.0.24 // indirect
+	github.com/modern-go/concurrent v0.0.0-20180306012644-bacd9c7ef1dd // indirect
+	github.com/modern-go/reflect2 v1.0.2 // indirect
+	github.com/pelletier/go-toml/v2 v2.4.3 // indirect
+	github.com/quic-go/qpack v0.6.0 // indirect
+	github.com/quic-go/quic-go v0.66.0 // indirect
+	github.com/twitchyliquid64/golang-asm v0.15.1 // indirect
+	github.com/ugorji/go/codec v1.3.2 // indirect
+	go.mongodb.org/mongo-driver/v2 v2.10.1 // indirect
+	golang.org/x/arch v0.33.0 // indirect
+	golang.org/x/exp v0.0.0-20261124000051-d6646c509b6d // indirect
+	golang.org/x/net v0.63.0 // indirect
+	golang.org/x/sys v0.50.0 // indirect
+	golang.org/x/text v0.44.0 // indirect
+	google.golang.org/protobuf v1.36.12 // indirect
+)
+</file>
+
+</files>
