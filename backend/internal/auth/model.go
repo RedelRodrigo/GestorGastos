@@ -17,7 +17,7 @@ type Usuario struct {
 type RegistroInput struct {
 	Email    string `json:"email" binding:"required,email,max=254"`
 	Username string `json:"username" binding:"required,min=2,max=40"`
-	Password string `json:"password" binding:"required,min=8,max=72"`
+	Password string `json:"password" binding:"required,min=6,max=72"`
 	Captcha  string `json:"captcha" binding:"required"`
 }
 
