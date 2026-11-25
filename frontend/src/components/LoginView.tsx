@@ -233,7 +233,7 @@ export default function LoginView({ onLoginSuccess }: LoginViewProps) {
             <label className="block text-xs font-medium text-zinc-400 mb-1">
               Contraseña{" "}
               {modo === "registro" && (
-                <span className="text-zinc-500">(mínimo 6 caracteres)</span>
+                <span className="text-zinc-500">(mínimo 8 caracteres)</span>
               )}
             </label>
             <div className="relative">
@@ -243,7 +243,7 @@ export default function LoginView({ onLoginSuccess }: LoginViewProps) {
               <input
                 type="password"
                 required
-                minLength={modo === "registro" ? 6 : 1}
+                minLength={modo === "registro" ? 8 : 1}
                 maxLength={72}
                 placeholder="••••••••"
                 value={password}
